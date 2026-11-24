@@ -1,0 +1,136 @@
+name: LineGuard Standalone Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract LineGuard source ZIP
+        id: project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p /tmp/lineguard/source
+          FOUND=false
+
+          for ZIP in ./*.zip; do
+            [ -f "$ZIP" ] || continue
+            TEMP="/tmp/lineguard/candidate"
+            rm -rf "$TEMP"
+            mkdir -p "$TEMP"
+
+            if unzip -q "$ZIP" -d "$TEMP" 2>/dev/null; then
+              APP_JSON=$(find "$TEMP" -path '*/artifacts/lineguard/app.json' -print -quit)
+
+              if [ -n "$APP_JSON" ]; then
+                cp -a "$TEMP/." /tmp/lineguard/source/
+                FOUND=true
+                echo "Found source ZIP: $ZIP"
+                break
+              fi
+            fi
+          done
+
+          if [ "$FOUND" != "true" ]; then
+            echo "Could not find a ZIP containing artifacts/lineguard/app.json."
+            exit 1
+          fi
+
+          APP_JSON=$(find /tmp/lineguard/source -path '*/artifacts/lineguard/app.json' -print -quit)
+          APP_DIR=$(dirname "$APP_JSON")
+          ROOT_DIR=$(find /tmp/lineguard/source -name pnpm-workspace.yaml -printf '%h\n' -quit)
+
+          if [ -z "$ROOT_DIR" ]; then
+            echo "Could not find pnpm-workspace.yaml."
+            exit 1
+          fi
+
+          echo "app=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "root=$ROOT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort | tail -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android SDK manager not found."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install "platform-tools"
+
+      - name: Install dependencies
+        working-directory: ${{ steps.project.outputs.root }}
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Generate Android project
+        working-directory: ${{ steps.project.outputs.app }}
+        env:
+          CI: "1"
+        run: pnpm exec expo prebuild --platform android --clean --no-install
+
+      - name: Remove unnecessary Foojay resolver
+        working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
+        run: |
+          if [ -f settings.gradle ]; then
+            sed -i '/foojay-resolver-convention/d' settings.gradle
+          fi
+
+      - name: Build release APK
+        working-directory: ${{ steps.project.outputs.app }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK
+        working-directory: ${{ steps.project.outputs.app }}/android
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          unzip -l "$APK" | grep 'assets/index.android.bundle'
+          sha256sum "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LineGuard-Release-APK
+          path: ${{ steps.project.outputs.app }}/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
