@@ -1,164 +1,41 @@
-name: LineGuard Standalone Android APK
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    name: Build Android Release APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Extract LineGuard source ZIP
-        id: project
-        shell: bash
-        run: |
-          set -e
-          mkdir -p /tmp/lineguard/source
-          FOUND=false
-
-          for ZIP in ./*.zip; do
-            [ -f "$ZIP" ] || continue
-            TEMP="/tmp/lineguard/candidate"
-            rm -rf "$TEMP"
-            mkdir -p "$TEMP"
-
-            if unzip -q "$ZIP" -d "$TEMP" 2>/dev/null; then
-              APP_JSON=$(find "$TEMP" -path '*/artifacts/lineguard/app.json' -print -quit)
-
-              if [ -n "$APP_JSON" ]; then
-                cp -a "$TEMP/." /tmp/lineguard/source/
-                FOUND=true
-                echo "Found source ZIP: $ZIP"
-                break
-              fi
-            fi
-          done
-
-          if [ "$FOUND" != "true" ]; then
-            echo "Could not find a ZIP containing artifacts/lineguard/app.json."
-            exit 1
-          fi
-
-          APP_JSON=$(find /tmp/lineguard/source -path '*/artifacts/lineguard/app.json' -print -quit)
-          APP_DIR=$(dirname "$APP_JSON")
-          ROOT_DIR=$(find /tmp/lineguard/source -name pnpm-workspace.yaml -printf '%h\n' -quit)
-
-          if [ -z "$ROOT_DIR" ]; then
-            echo "Could not find pnpm-workspace.yaml."
-            exit 1
-          fi
-
-          echo "app=$APP_DIR" >> "$GITHUB_OUTPUT"
-          echo "root=$ROOT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Set up pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@10 --activate
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
       - name: Configure Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-          SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort | tail -n 1)
+          mkdir -p "$SDK/cmdline-tools"
+          cd "$RUNNER_TEMP"
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "Android SDK manager not found."
+          echo "Downloading Android command-line tools..."
+          curl -fL \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+            -o android-commandline-tools.zip
+
+          mkdir -p android-tools
+          unzip -q android-commandline-tools.zip -d android-tools
+
+          rm -rf "$SDK/cmdline-tools/latest"
+          mkdir -p "$SDK/cmdline-tools/latest"
+          cp -a android-tools/cmdline-tools/. "$SDK/cmdline-tools/latest/"
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager was not installed."
             exit 1
           fi
 
-          echo "Using SDK manager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" --install "platform-tools"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses || true
 
-      - name: Install dependencies
-        working-directory: ${{ steps.project.outputs.root }}
-        run: pnpm install --no-frozen-lockfile
+          "$SDKMANAGER" --sdk_root="$SDK" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
-      - name: Generate Android project
-        working-directory: ${{ steps.project.outputs.app }}
-        env:
-          CI: "1"
-        run: pnpm exec expo prebuild --platform android --clean --no-install
-
-      - name: Remove unnecessary Foojay resolver
-        working-directory: ${{ steps.project.outputs.app }}/android
-        shell: bash
-        run: |
-          if [ -f settings.gradle ]; then
-            sed -i '/foojay-resolver-convention/d' settings.gradle
-          fi
-
-      - name: Show build environment
-        working-directory: ${{ steps.project.outputs.app }}/android
-        run: |
-          java -version
-          ./gradlew --version
-          echo "Android SDK: ${ANDROID_HOME:-not set}"
-
-      - name: Build release APK with diagnostics
-        working-directory: ${{ steps.project.outputs.app }}/android
-        shell: bash
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            --warning-mode all
-
-      - name: Verify APK and embedded JavaScript bundle
-        working-directory: ${{ steps.project.outputs.app }}/android
-        shell: bash
-        run: |
-          set -e
-          APK="app/build/outputs/apk/release/app-release.apk"
-
-          if [ ! -s "$APK" ]; then
-            echo "ERROR: Release APK was not generated."
-            exit 1
-          fi
-
-          if ! unzip -l "$APK" | grep -q 'assets/index.android.bundle'; then
-            echo "ERROR: Embedded JavaScript bundle not found."
-            unzip -l "$APK" | head -100
-            exit 1
-          fi
-
-          echo "Standalone APK verified."
-          ls -lh "$APK"
-          sha256sum "$APK"
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: LineGuard-Release-APK
-          path: ${{ steps.project.outputs.app }}/android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-          retention-days: 14
+          echo "Android SDK setup complete."
