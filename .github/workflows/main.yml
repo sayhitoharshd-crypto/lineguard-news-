@@ -1,4 +1,4 @@
-       name: LineGuard Android APK
+       name: LineGuard Workflow Check
 
 on:
   workflow_dispatch:
@@ -6,16 +6,9 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Check workflow YAML
-        run: |
-          echo "Workflow YAML parsed successfully."
+      - name: Confirm workflow is valid
+        run: echo "Workflow is valid"
