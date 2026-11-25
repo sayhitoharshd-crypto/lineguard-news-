@@ -1,4 +1,4 @@
-      - name: Configure Android SDK
+       name: Configure Android SDK
         shell: bash
         run: |
           set -euo pipefail
