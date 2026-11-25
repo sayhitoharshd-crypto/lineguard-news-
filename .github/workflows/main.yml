@@ -87,11 +87,13 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
           SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f | sort | tail -n 1)
+
           if [ -z "$SDKMANAGER" ]; then
             echo "Android SDK manager not found."
             exit 1
           fi
 
+          echo "Using SDK manager: $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses || true
           "$SDKMANAGER" --install "platform-tools"
 
@@ -113,18 +115,44 @@ jobs:
             sed -i '/foojay-resolver-convention/d' settings.gradle
           fi
 
-      - name: Build release APK
+      - name: Show build environment
         working-directory: ${{ steps.project.outputs.app }}/android
+        run: |
+          java -version
+          ./gradlew --version
+          echo "Android SDK: ${ANDROID_HOME:-not set}"
+
+      - name: Build release APK with diagnostics
+        working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            --warning-mode all
 
-      - name: Verify APK
+      - name: Verify APK and embedded JavaScript bundle
         working-directory: ${{ steps.project.outputs.app }}/android
+        shell: bash
         run: |
+          set -e
           APK="app/build/outputs/apk/release/app-release.apk"
-          test -s "$APK"
-          unzip -l "$APK" | grep 'assets/index.android.bundle'
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: Release APK was not generated."
+            exit 1
+          fi
+
+          if ! unzip -l "$APK" | grep -q 'assets/index.android.bundle'; then
+            echo "ERROR: Embedded JavaScript bundle not found."
+            unzip -l "$APK" | head -100
+            exit 1
+          fi
+
+          echo "Standalone APK verified."
+          ls -lh "$APK"
           sha256sum "$APK"
 
       - name: Upload APK artifact
